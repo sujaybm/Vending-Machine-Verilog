@@ -1,0 +1,500 @@
+//Final code for the vending machine design.
+//Literal usage of LEDs and pushbuttons.
+//Designed for Verilog to be used on a Terasic FPGA.
+	
+
+/* ================ Compiler Definitions ================ */
+
+// Timescale definitions
+//When compiling with testbench, comment this timescale out
+`timescale 1ns/1ns
+	
+//State definitions
+`define state1 3'b001  // State 1 : Reset
+`define state2 3'b010  // State 2 : Ask user to select product
+`define state3 3'b011  // State 3 : Display cost for the selected product and confirm
+`define state4 3'b100  // State 4 : Allow user to input currency
+`define state5 3'b101  // State 5 : Calculate if enough money
+`define state6 3'b110  // State 6 : Ask for receipt or to cancel
+`define state7 3'b111  // State 7 : Release product
+	
+//List of products in BCD format
+`define candybar    4'b0001 // Product 1 
+`define cheetos     4'b0010 // Product 2
+`define frappuccino 4'b0011 // Product 3
+`define coke        4'b0100 // Product 4
+`define water       4'b0101 // Product 5
+
+//Costs of all products, multiplied by 100 to get integers
+`define c_cand 325 // Cost of product 1 : $3.25
+`define c_chee 275 // Cost of product 2 : $2.75
+`define c_frap 350 // Cost of product 3 : $3.50
+`define c_coke 150 // Cost of product 4 : $1.50
+`define c_wate 100 // Cost of product 5 : $1.00
+
+//FPGA clock at 50 Mhz
+//internal clock frequency (hz) = 2 * (clkscale / 1000000) / 50
+`define clkscale 5000000
+
+/* ================ Clock Divider Module ================ */
+module clk_divider(clk_in, clk_out);
+
+	input clk_in;
+	output clk_out;
+
+	reg clk_out = 1'b0;
+	integer count = 0;
+
+	always @ (posedge clk_in) begin
+		if (count < `clkscale)
+			count <= count+1;
+		else begin
+			clk_out <= !clk_out;
+			count <= 0;
+		end
+	end
+
+endmodule // end clk divider
+
+/* ================ Debouncer Module ================ */	
+module pb_debouncer(clk, pb_in, pb_out);
+
+	input clk;
+	input pb_in;
+	output pb_out; 
+
+	reg pb_out;
+	reg pb_in_reg;
+	reg pb_out_temp1;
+	reg pb_out_temp2;
+
+	always @ (posedge clk) begin
+		pb_in_reg <= pb_in;
+		pb_out_temp1 <= pb_in_reg;
+		pb_out_temp2 <= pb_out_temp1;
+		pb_out <= ~pb_out_temp2 & pb_out_temp1;
+	end
+
+endmodule // end pb_debouncer
+	
+/* ================ Seven Segment Display Module  ================ */
+module display7 (in_bcd, seven);
+
+	input [3:0] in_bcd;
+	output [6:0] seven;
+
+	reg [6:0] seven;
+
+	always @ (in_bcd) begin
+		case (in_bcd)
+			4'b0000 : seven = 7'b1000000;	//7'b0111111;  Display zero
+			4'b0001 : seven = 7'b1111001;	//7'b0000110;  Display one
+			4'b0010 : seven = 7'b0100100;	//7'b1011011;  Display two
+			4'b0011 : seven = 7'b0110000;	//7'b1001111;  Display three
+			4'b0100 : seven = 7'b0011001;	//7'b1100110;  Display four
+			4'b0101 : seven = 7'b0010010;	//7'b1101101;  Display five
+			4'b0110 : seven = 7'b0000010;	//7'b1111101;  Display six
+			4'b0111 : seven = 7'b1111000;	//7'b0000111;  Display seven
+			4'b1000 : seven = 7'b0000000;	//7'b1111111;  Display eight
+			4'b1001 : seven = 7'b0010000;	//7'b1101111;  Display nine
+			default : seven = 7'b1111111;	//7'b0000000;  Display empty
+		endcase
+	end
+
+endmodule // end display7
+	
+	
+/* ================ Vending Machine Module ================ */
+module vend_machine (clk, rst,
+                     prod1, prod2, prod3, prod4, prod5, 
+                     curr1, curr2, curr3,
+                     confirm, cancel, 
+                     print_confirm, print_cancel, 
+                     out_led,
+                     hex5, hex2, hex1, hex0, hex27, hex4);
+	     
+	input clk;
+	wire clk;
+
+	input rst;
+	wire rst;
+
+	input prod1, prod2, prod3, prod4, prod5;
+	wire prod1, prod2, prod3, prod4, prod5;
+
+	input curr1, curr2, curr3;
+	wire curr1, curr2, curr3;
+
+	input confirm, cancel;
+	wire confirm, cancel; 
+
+	input print_confirm, print_cancel;
+	wire print_confirm, print_cancel;
+
+	output [9:0] out_led; // To turn on certain LEDs
+	reg [9:0] out_led;  
+
+	output [6:0] hex5; // To display product selected
+	output [6:0] hex2; // To display amount units place
+	output [6:0] hex1; // To display amount decimal place 1
+	output [6:0] hex0; // To display amount decimal place 2
+	wire [6:0] hex5;
+	wire [6:0] hex2;
+	wire [6:0] hex1;
+	wire [6:0] hex0;
+
+	output hex27;  // To display decimal point
+	reg hex27;    
+
+	output [6:0] hex4;  // To display negative sign
+	reg [6:0] hex4;
+
+	reg [2:0] current_state;
+	reg [2:0] next_state;
+
+	reg [8:0] current_amount;  // The amount the user has put in so far
+	reg [8:0] prod_cost;  // The cost of the product once the user selects
+	reg [8:0] change_amount;  // The change left for the user input
+
+	//variables for the 7 segment display
+	reg [3:0] dsp_product;  //should display on HEX4
+	reg [3:0] dsp_ones;  //should display on HEX2
+	reg [3:0] dsp_tens;  //should display on HEX1
+	reg [3:0] dsp_hund;  //should display on HEX0
+
+	reg user_input_interrupt;
+
+	display7 hold5 (.in_bcd(dsp_product), .seven(hex5)); // To display product seleced
+	display7 hold2 (.in_bcd(dsp_ones), .seven(hex2)); // To display amount in the units place
+	display7 hold1 (.in_bcd(dsp_tens), .seven(hex1)); // To display amount in the decimal place 1
+	display7 hold0 (.in_bcd(dsp_hund), .seven(hex0)); // To display amount in the decimal place 2
+
+	integer i;
+
+	initial begin
+		i = 0;
+		current_state = `state1; 
+		next_state = `state1; 
+		hex27 = 0;
+		user_input_interrupt = 0;
+	end
+
+/* ================ BCD Converter ================ */
+	task bcd_conv;
+		input [8:0] in_dec;
+		output [3:0] out_bcd2;
+		output [3:0] out_bcd1;
+		output [3:0] out_bcd0;
+
+		reg [8:0] ones, tens, hund;
+
+		begin
+			ones = (in_dec / 9'b001100100);
+			tens = (in_dec % 9'b001100100) / 9'b000001010;
+			hund = (in_dec % 9'b000001010);
+			case (ones)
+				1: out_bcd2 = 4'b0001;
+				2: out_bcd2 = 4'b0010;
+				3: out_bcd2 = 4'b0011;
+				4: out_bcd2 = 4'b0100;
+				5: out_bcd2 = 4'b0101;
+				6: out_bcd2 = 4'b0110;
+				7: out_bcd2 = 4'b0111;
+				8: out_bcd2 = 4'b1000;
+				9: out_bcd2 = 4'b1001;
+				default: out_bcd2 = 4'b0000;
+			endcase
+			case (tens)
+				1: out_bcd1 = 4'b0001;
+				2: out_bcd1 = 4'b0010;
+				3: out_bcd1 = 4'b0011;
+				4: out_bcd1 = 4'b0100;
+				5: out_bcd1 = 4'b0101;
+				6: out_bcd1 = 4'b0110;
+				7: out_bcd1 = 4'b0111;
+				8: out_bcd1 = 4'b1000;
+				9: out_bcd1 = 4'b1001;
+				default: out_bcd1 = 4'b0000;
+			endcase
+				case (hund)
+				1: out_bcd0 = 4'b0001;
+				2: out_bcd0 = 4'b0010;
+				3: out_bcd0 = 4'b0011;
+				4: out_bcd0 = 4'b0100;
+				5: out_bcd0 = 4'b0101;
+				6: out_bcd0 = 4'b0110;
+				7: out_bcd0 = 4'b0111;
+				8: out_bcd0 = 4'b1000;
+				9: out_bcd0 = 4'b1001;
+				default: out_bcd0 = 4'b0000;
+			endcase
+		end
+		
+	endtask
+
+/* ================ State Update ================ */
+	always @ (negedge clk) begin
+		if (rst) begin
+			current_state = `state1;
+		end
+		else if (user_input_interrupt) begin
+			current_state = next_state;
+		end
+	end
+
+/* ================ Current / Next State Logic ================ */
+	always @ (posedge clk) begin
+		user_input_interrupt = 0;
+
+		case (current_state)
+			`state1: begin
+				out_led = 0;
+				out_led[0] = 1;
+				//Cardboard reads: "Reset state, no user input"
+
+				// Output Logic
+				current_amount = 0; prod_cost = 0;
+				dsp_product = 4'b0000; 
+				dsp_ones = 0; dsp_tens = 0; dsp_hund = 0;
+				hex4 = 7'b1111111;
+
+				// Next State Logic
+				next_state = `state2;
+
+				// Delay Logic for 4 seconds 
+				if (i<5)
+					i = i+1;
+				else
+					user_input_interrupt = 1;
+			end
+
+			`state2: begin
+				i = 0;
+				out_led[0] = 0;
+				out_led[2] = 0;
+				out_led[1] = 1;
+				//Cardboard reads: "Please select a product"
+
+				// Output Logic
+				if (prod1) begin
+					dsp_product = `candybar;
+					prod_cost = `c_cand;
+					user_input_interrupt = 1;
+				end
+				else if (prod2) begin
+					dsp_product = `cheetos;
+					prod_cost = `c_chee;
+					user_input_interrupt = 1;
+				end
+				else if (prod3) begin
+					dsp_product = `frappuccino;
+					prod_cost = `c_frap;
+					user_input_interrupt = 1;
+				end
+				else if (prod4) begin
+					dsp_product = `coke;
+					prod_cost = `c_coke;
+					user_input_interrupt = 1;
+				end
+				else if (prod5) begin
+					dsp_product = `water;
+					prod_cost = `c_wate;
+					user_input_interrupt = 1;
+				end
+				bcd_conv(prod_cost, dsp_ones, dsp_tens, dsp_hund);
+
+				// Next State Logic
+				next_state = `state3;
+			end
+
+			`state3: begin 
+				out_led[1] = 0;
+				out_led[2] = 1;
+				//Cardboard reads: "Product cost shown, user confirm or cancel purchase"
+
+				// Next State Logic
+				if (confirm) begin
+					next_state = `state4;
+					user_input_interrupt = 1;
+				end
+				else if (cancel) begin
+					next_state = `state1;
+					user_input_interrupt = 1;
+				end
+			end
+
+			`state4: begin
+				out_led[2] = 0;
+				out_led[4] = 0;
+				out_led[3] = 1;
+				//Cardboard reads: "Please enter money, user inputs currency"
+
+				// Output Logic
+				if (curr1) begin
+					current_amount = current_amount + 25;
+					user_input_interrupt = 1;
+				end
+				else if (curr2) begin
+					current_amount = current_amount + 50;
+					user_input_interrupt = 1;
+				end
+				else if (curr3) begin
+					current_amount = current_amount + 100;
+					user_input_interrupt = 1;
+				end
+
+				if (current_amount > prod_cost)
+					change_amount = current_amount - prod_cost;
+				else
+					change_amount = prod_cost - current_amount;
+					
+				bcd_conv(change_amount, dsp_ones, dsp_tens, dsp_hund);
+
+				// Next State Logic
+				next_state = `state5;
+			end
+
+			`state5: begin
+				out_led[3] = 0;
+				out_led[4] = 1;
+				//Cardboard reads: "Calculing if user has input the right amount"
+				
+				// Next State Logic
+				if (current_amount == prod_cost) begin
+					next_state = `state6;
+					user_input_interrupt = 1;
+				end
+				else if (current_amount > prod_cost) begin
+					hex4 = 7'b0111111; 
+					next_state = `state6;
+					user_input_interrupt = 1;
+				end		
+				else begin
+					next_state = `state4;
+					user_input_interrupt = 1;
+				end
+			end
+
+			`state6: begin
+				out_led[4] = 0;
+				out_led[5] = 1;
+				//Cardboard reads: "Confirm purchase and get receipt"
+
+				// Output Logic
+				if (print_confirm) begin
+					bcd_conv(change_amount, dsp_ones, dsp_tens, dsp_hund);
+					user_input_interrupt = 1;
+					out_led[7] = 1;
+					if (hex4 == 7'b0111111) begin
+						out_led[9] = 1;
+					end		
+				end
+				else if (print_cancel) begin
+					bcd_conv(current_amount, dsp_ones, dsp_tens, dsp_hund);
+					user_input_interrupt = 1;
+					out_led[8] = 1;
+					out_led[9] = 1;
+				end
+
+				// Next State Logic
+				next_state = `state7;
+			end
+
+			`state7: begin
+				out_led[5] = 0;
+				out_led[6] = 1;
+				//Cardboard reads: "Product and change dispensed"
+
+				//Next State logic
+				next_state = `state1;
+
+				// Delay logic
+				if (i<15)
+					i = i+1;
+				else
+					user_input_interrupt = 1;
+			end
+
+			default: begin
+				next_state = `state1;
+			end
+		endcase			  
+	end 
+
+endmodule  //end vend_machine
+
+/* ================ Vending Mchine Board Interfacing Module ================ */
+module vend_board (clk,rst,
+                   p1,p2,p3,p4,p5,
+                   c1,c2,c3,
+                   conf,canc,
+                   pconf,pcanc,
+                   out_led,
+                   hex0, hex1, hex2, hex5, hex27, hex4);
+
+	input clk;
+	input rst;
+	input p1,p2,p3,p4,p5;
+	input c1,c2,c3;
+	input conf,canc;
+	input pconf,pcanc;
+	output [9:0] out_led;
+	output [6:0] hex0,hex1,hex2,hex5;
+	output hex27;
+	output [6:0] hex4;
+
+	wire clk_div;
+	wire rsto;
+	wire p1o,p2o,p3o,p4o,p5o;
+	wire c1o,c2o,c3o;
+	wire confo,canco;
+	wire pconfo,pcanco;
+	wire [9:0] out_led;
+	wire [6:0] hex0,hex1,hex2,hex5;
+	wire hex27;
+	wire [6:0]hex4;
+
+	clk_divider divide (.clk_in(clk),.clk_out(clk_div));
+
+	pb_debouncer 	RST (.clk(clk_div), .pb_in(rst), .pb_out(rsto));
+
+	pb_debouncer 	PB1 (.clk(clk_div), .pb_in(p1), .pb_out(p1o));
+	pb_debouncer 	PB2 (.clk(clk_div), .pb_in(p2), .pb_out(p2o));
+	pb_debouncer 	PB3 (.clk(clk_div), .pb_in(p3), .pb_out(p3o));
+	pb_debouncer 	PB4 (.clk(clk_div), .pb_in(p4), .pb_out(p4o));
+	pb_debouncer 	PB5 (.clk(clk_div), .pb_in(p5), .pb_out(p5o));
+
+	pb_debouncer 	CB1 (.clk(clk_div), .pb_in(c1), .pb_out(c1o));
+	pb_debouncer 	CB2 (.clk(clk_div), .pb_in(c2), .pb_out(c2o));
+	pb_debouncer 	CB3 (.clk(clk_div), .pb_in(c3), .pb_out(c3o));
+
+	pb_debouncer 	CO1 (.clk(clk_div), .pb_in(conf), .pb_out(confo));
+	pb_debouncer 	CA2 (.clk(clk_div), .pb_in(canc), .pb_out(canco));
+
+	pb_debouncer 	PCO1 (.clk(clk_div), .pb_in(pconf), .pb_out(pconfo));
+	pb_debouncer 	PCA2 (.clk(clk_div), .pb_in(pcanc), .pb_out(pcanco));
+
+	vend_machine main1 (.clk(clk_div),
+		.rst(rsto),
+		.prod1(p1o),
+		.prod2(p2o),
+		.prod3(p3o),
+		.prod4(p4o),
+		.prod5(p5o),
+		.curr1(c1o),
+		.curr2(c2o),
+		.curr3(c3o),
+		.confirm(confo),
+		.cancel(canco),
+		.print_confirm(pconfo),
+		.print_cancel(pcanco),	
+		.out_led(out_led),
+		.hex5(hex5),
+		.hex2(hex2),
+		.hex1(hex1),
+		.hex0(hex0), 
+		.hex27(hex27),
+		.hex4(hex4));
+	//end vend_machine instantiation
+
+endmodule  //end vend_board

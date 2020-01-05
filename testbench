@@ -1,0 +1,134 @@
+//created 28-Oct-2019, last edited 2-Dec-2019
+//testbench for finalcode.v
+
+//Comment out timescale in finalcode.v
+`timescale 1us/10ns
+
+`define ldelay #7000
+`define sdelay #1000
+
+/* ================ INITIALIZATION ================ */
+module testbench ();
+reg clk;
+reg endsim;
+
+reg machine_reset;
+reg p1, p2, p3, p4, p5;
+reg c1, c2, c3;
+reg conf, canc, pconf, pcanc;
+wire [9:0] out_led;
+wire [6:0] hex0, hex1, hex2, hex4, hex5;
+wire hex27;
+
+integer decode1;
+
+vend_board instance0 (
+.clk(clk),
+.rst(machine_reset),
+.p1(p1),
+.p2(p2),
+.p3(p3),
+.p4(p4),
+.p5(p5),
+.conf(conf),
+.canc(canc),
+.c1(c1),
+.c2(c2),
+.c3(c3),
+.pconf(pconf),
+.pcanc(pconf),
+.out_led(out_led),
+.hex0(hex0),
+.hex1(hex1),
+.hex2(hex2),
+.hex4(hex4),
+.hex5(hex5),
+.hex27(hex27)
+);
+
+/* ================ CLOCK ================ */
+initial begin
+	clk = 0;
+	#0.01 while (endsim != 1)
+		#0.01 clk = !clk;
+end
+
+/* ================ DUMPFILE ================ */
+initial begin
+	$dumpfile("outwaveform.vcd");
+	$dumpvars();
+end
+
+
+/* ================ 7SEG DECODER ================ */
+task seven_decode;
+	input [6:0] in_seven;
+	
+	begin
+		case (in_seven)
+			7'b1000000: $write("ZERO");
+			7'b1111001: $write("ONE");
+			7'b0100100: $write("TWO");
+			7'b0110000: $write("THREE");
+			7'b0011001: $write("FOUR");
+			7'b0010010: $write("FIVE");
+			7'b0000010: $write("SIX");
+			7'b1111000: $write("SEVEN");
+			7'b0000000: $write("EIGHT");
+			7'b0010000: $write("NINE");
+			7'b1111111: $write("EMPTY");
+			default   : $write("ERROR");
+		endcase
+	end
+endtask
+
+/* ================ OUTPUT DECODER ================ */
+always @ (out_led) begin
+	casex (out_led)
+		10'bxxx1000000: decode1 = 6;
+		10'bxxx0100000: decode1 = 5;
+		10'bxxx0010000: decode1 = 4;
+		10'bxxx0001000: decode1 = 3;
+		10'bxxx0000100: decode1 = 2;
+		10'bxxx0000010: decode1 = 1;
+		10'bxxx0000001: decode1 = 0;
+		default       : decode1 = 7;
+	endcase
+	$display("\nNow in state %0d", decode1);
+end
+
+always @ (hex5) begin
+	$write("Product: ");
+	seven_decode(hex5);
+	$write("\n");
+end
+
+always @ (hex0, hex1, hex2) begin
+	$write("Money: ");
+	seven_decode(hex2);
+	$write(" . ");
+	seven_decode(hex1);
+	$write(" ");
+	seven_decode(hex0);
+	$write("\n");
+end
+
+/* ================ MAIN TESTBENCH ================ */
+initial begin
+	endsim = 0;
+	p1 = 0; p2 = 0; p3 = 0; p4 = 0; p5 = 0;
+	c1 = 0; c2 = 0; c3 = 0;
+	conf = 0; canc = 0; pconf = 0; pcanc = 0; 
+	
+	`ldelay p1 = 1;		`sdelay p1 = 0;
+	`ldelay canc = 1;	`sdelay canc = 0;
+	`ldelay p4 = 1;		`sdelay p4 = 0;
+	`ldelay conf = 1;	`sdelay conf = 0;
+	`ldelay c1 = 1;		`sdelay c1 = 0;
+	`ldelay c2 = 1;		`sdelay c2 = 0;
+	`ldelay c3 = 1;		`sdelay c3 = 0;
+	`ldelay pconf = 1;	`sdelay pconf = 0;
+	
+	#10000 endsim = 1;
+end
+endmodule

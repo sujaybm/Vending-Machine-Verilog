@@ -1,0 +1,278 @@
+//created 22-Oct-2019, last edited 12-Nov-2019
+//Main code for the vending machine design.
+//Designed for Verilog to be used on a Terasic FPGA.
+
+/* ================ COMPILER DEFINITIONS ================ */
+`timescale 10ns/1ns
+
+`define state0 3'b000  //reset
+`define state1 3'b001  //ask user to select product
+`define state2 3'b010  //display cost for the selected product and confirm
+`define state3 3'b011  //allow user to input currency
+`define state4 3'b100  //calculate if enough money
+`define state5 3'b101  //confirm monetary input and product
+`define state6 3'b110  //release product
+
+`define candybar    3'b001
+`define cheetos     3'b010
+`define frappuccino 3'b011
+`define coke        3'b100
+`define water       3'b101
+
+//costs of all products
+`define c_cand 3.25
+`define c_chee 2.75
+`define c_frap 3.50
+`define c_coke 1.50
+`define c_wate 1.00
+
+//conditional compile directive uncomment to enable debug mode
+//debug mode prints additional messages to the display
+//`define debug
+
+
+/* ================ MAIN FUNCTION ================ */
+module main (read, confirmCancel, keypad, clk);
+
+input read;  //signal to read the button signals
+input [1:0] confirmCancel;  //button signals from confirm and cancel buttons
+input [7:0] keypad;  //button signals from the keypad
+                     //first 5 are product selection
+                     //last 3 are currency amount selection
+input clk;  //clock
+                     
+wire [1:0] confirmCancel;
+wire [7:0] keypad;
+wire clk;
+
+reg [2:0] current_state;
+reg [2:0] next_state;
+reg error_flag;
+
+reg [2:0] product;  //current product chosen
+real current_amount;  //current amount the user has put in so far
+real prod_cost;  //cost of the product once selection occurs
+
+reg [4:0] selector2;  //selector for state2 mux
+reg [2:0] selector4;  //selector for state4 mux
+
+reg user_input_interrupt;  //check to see if the user has pressed a button, device should
+                               //not move forward if a button hasn't been pressed
+
+//these values go high if their corresponding button signals are set high
+reg user_confirm, user_cancel;
+reg amount25, amount50, amount100;
+reg b_cand, b_chee, b_frap, b_coke, b_wate;
+
+initial begin
+  $display("\n**START OF MAIN**\n");
+  current_state = `state0;
+  next_state = `state0;
+  error_flag = 0;
+  product = 3'b000;
+  current_amount = 0; prod_cost = 0;
+  selector2 = 5'b00000; selector4 = 3'b000;
+  user_input_interrupt = 0;
+  user_confirm = 0; user_cancel = 0;
+  amount25 = 0; amount50 = 0; amount100 = 0;
+  b_cand = 0; b_chee = 0; b_frap = 0; b_coke = 0; b_wate = 0;
+end
+
+/* ================ BUTTON DECODING ================ */
+always @ (posedge read)
+begin : set_button_variable
+  `ifdef debug $display("%0t ns: *BUTTON DECODING*\nCC %b K %b", $time, confirmCancel, keypad); `endif
+  if ((current_state == `state2) | (current_state == `state5))
+    case (confirmCancel)
+      2'b10: user_confirm = 1;
+      2'b01: user_cancel = 1;
+      default: $display("Error: invalid confirmCancel value");
+    endcase
+  if (current_state == `state1)
+    case (keypad)
+      8'b10000000: b_cand = 1;
+      8'b01000000: b_chee = 1;
+      8'b00100000: b_frap = 1;
+      8'b00010000: b_coke = 1;
+      8'b00001000: b_wate = 1;
+      default: $display("Error: invalid keypad (product) value");
+    endcase
+  if (current_state == `state3)
+    case (keypad)
+      8'b00000100: amount25 = 1;
+      8'b00000010: amount50 = 1;
+      8'b00000001: amount100 = 1;
+      default: $display("Error: invalid keypad (money) value");
+    endcase
+  `ifdef debug
+  $write("CoCa %b %b ", user_confirm, user_cancel);
+  $write("Pr %b %b %b %b %b ", b_cand, b_chee, b_frap, b_coke, b_wate);
+  $write("Am %b %b %b\n\n", amount25, amount50, amount100);
+  `endif
+  user_input_interrupt = 1;
+end  //end set_button_variable
+
+/* ================ ERROR FLAG ================ */
+always @ (posedge error_flag)
+begin : error_led
+  $display("Error occurred at %0t ns", $time);
+end
+
+/* ================ STATE UPDATE ================ */
+always @ (posedge clk)
+begin : state_update
+  if (user_input_interrupt) begin
+    current_state = next_state;
+    user_input_interrupt = 0;
+    `ifdef debug $display("\n%0t ns: *STATE CHANGE*\nCurrently in State %b\n", $time, current_state); `endif
+  end
+end
+
+/* ================ NEXT STATE LOGIC ================ */
+always @ (current_state, current_amount, posedge user_confirm)
+begin : next_state_logic
+  case (current_state)
+    `state0: next_state = `state1;
+    `state1: next_state = `state2;
+    `state2: begin
+               if (user_confirm) begin
+                 next_state = `state3;
+                 `ifdef debug $display("%0t ns: NSL: S2 will go to S3\n", $time); `endif
+               end
+               else begin
+                 next_state = `state1;
+                 `ifdef debug $display("%0t ns: NSL: S2 will go to S1\n", $time); `endif
+               end
+               user_confirm = 0;
+               user_cancel = 0;
+             end
+    `state3: next_state = `state4;
+    `state4: begin
+               if (current_amount >= prod_cost)
+                 next_state = `state5;
+               else
+                 next_state = `state3;
+             end
+    `state5: next_state = `state6;
+    `state6: next_state = `state0;
+    default: begin
+               next_state = `state0;
+               error_flag = 1;
+               $display("Error: state defaulted");
+             end
+  endcase
+end  //end next_state_logic
+
+/* ================ COMBINATIONAL OUTPUT LOGIC ================ */
+always @ (current_state)
+begin : output_logic
+  case (current_state)
+    `state0: begin
+               //display nothing
+               product = 3'b000;
+               current_amount = 0; prod_cost = 0;
+               selector2 = 5'b00000; selector4 = 3'b000;
+               user_input_interrupt = 0;
+               user_confirm = 0; user_cancel = 0;
+               amount25 = 0; amount50 = 0; amount100 = 0;
+               b_cand = 0; b_chee = 0; b_frap = 0; b_coke = 0; b_wate = 0;
+               #1 user_input_interrupt = 1;  //SM should move to State1 automatically
+             end
+    `state1: begin
+               $display("%0t ns: *DISPLAY*\nPlease select a product\n", $time);
+             end
+    `state2: begin
+               selector2 = {b_cand, b_chee, b_frap, b_coke, b_wate};
+               case (selector2)
+                 5'b10000 : begin product = `candybar;
+                            prod_cost = `c_cand;
+                            end
+                 5'b01000 : begin product = `cheetos;
+                            prod_cost = `c_chee;
+                            end
+                 5'b00100 : begin product = `frappuccino;
+                            prod_cost = `c_frap;
+                            end
+                 5'b00010 : begin product = `coke;
+                            prod_cost = `c_coke;
+                            end
+                 5'b00001 : begin product = `water;
+                            prod_cost = `c_wate;
+                            end
+                 default  : begin product = 3'b000;
+                            prod_cost = 0;
+                            end
+               endcase
+               b_cand = 0;
+               b_chee = 0;
+               b_frap = 0;
+               b_coke = 0;
+               b_wate = 0;
+               $display("%0t ns: *DISPLAY*", $time);
+               case (product)
+                 `candybar    : $display("Candybar: $",    `c_cand, "\nConfirm?\n");
+                 `cheetos     : $display("Cheetos: $",     `c_chee, "\nConfirm?\n");
+                 `frappuccino : $display("Frappuccino: $", `c_frap, "\nConfirm?\n");
+                 `coke        : $display("Coke: $",        `c_coke, "\nConfirm?\n");
+                 `water       : $display("Water: $",       `c_wate, "\nConfirm?\n");
+               endcase
+             end
+    `state3: begin
+               $display("%0t ns: *DISPLAY*\nAmount remaining due: $", $time, prod_cost - current_amount, "\n");
+             end
+    `state4: //display nothing
+             begin
+               selector4 = {amount25, amount50, amount100};
+               case (selector4)
+                 3'b100 : current_amount = current_amount + 0.25;
+                 3'b010 : current_amount = current_amount + 0.5;
+                 3'b001 : current_amount = current_amount + 1;
+                 default: begin
+                            error_flag = 1;
+                            $display("Error: amount selection defaulted");
+                          end
+               endcase
+               amount25 = 0;
+               amount50 = 0;
+               amount100 = 0;
+               //timing note: next_state_logic for state4 must be fully calculated before next clock cycle
+               #1 user_input_interrupt = 1;  //device must go to next state directly, not waiting on user
+             end
+    `state5: begin
+               $write("%0t ns: *DISPLAY*\nBuying ", $time);
+               case (product)
+                 `candybar    : $write("Candybar");
+                 `cheetos     : $write("Cheetos");
+                 `frappuccino : $write("Frappuccino");
+                 `coke        : $write("Coke");
+                 `water       : $write("Water");
+                 default      : begin
+                                  error_flag = 1;
+                                  $display("Error: State 5 product display defaulted");
+                                end
+               endcase
+               $display(" with $", current_amount, "\nConfirm?\n");
+             end
+    `state6: begin
+               $display("%0t ns: *DISPLAY*", $time);
+               if (user_confirm)
+                 $display("Product dispensed\n$", current_amount - prod_cost, " change given\n");
+               else if (user_cancel)
+                 $display("Purchase cancelled\n$", current_amount, " change given\n");
+               else begin
+                 error_flag = 1;
+                 $display("Error: State 6 confirmation invalid");
+               end
+               user_confirm = 0;
+               user_cancel = 0;
+               #3000 $display("%0t ns: *DISPLAY*\nThank you for your purchase\n", $time);
+               #3000 user_input_interrupt = 1;  //SMshould move to State0 automatically
+             end
+    default: begin
+               error_flag = 1;
+               $display("Error: output logic defaulted");
+             end
+  endcase
+end  //end output_logic
+
+endmodule //end main
